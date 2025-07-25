@@ -1,1 +1,28 @@
-/target
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# WebAssembly
+/pkg/
+*.wasm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node modules (if using npm)
+node_modules/
+
+# Build artifacts
+dist/
+build/
