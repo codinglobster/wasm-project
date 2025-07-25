@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Conway's Game of Life - WASM</title>
+    <style>
+        body {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+
+        #game-of-life-canvas {
+            border: 1px solid #cccccc;
+            background-color: #000;
+        }
+
+        .controls {
+            margin: 10px 0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: white;
+        }
+
+        input[type="number"] {
+            width: 60px;
+            padding: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #333;
+            color: white;
+        }
+
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        #pause-play {
+            background-color: #2196F3;
+        }
+
+        #pause-play:hover {
+            background-color: #1976D2;
+        }
+
+        .info {
+            margin: 15px 0;
+            text-align: center;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        .stats span {
+            padding: 5px 10px;
+            border-radius: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid #444;
+        }
+
+        #fps-display {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+
+        #alive-count {
+            color: #2196F3;
+            font-weight: bold;
+        }
+
+        #generation-count {
+            color: #FF9800;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Conway's Game of Life</h1>
+    <div class="controls">
+        <button id="pause-play">⏸️ Pause</button>
+        <button id="reset">🔄 Reset</button>
+        <button id="clear">🧹 清空</button>
+        <button id="randomize">🎲 随机</button>
+        <button id="perf-test">⚡ 性能测试</button>
+    </div>
+    <div class="controls">
+        <label>宽度: <input type="number" id="width-input" value="64" min="10" max="200"></label>
+        <label>高度: <input type="number" id="height-input" value="64" min="10" max="200"></label>
+        <button id="resize">📏 调整大小</button>
+        <button id="glider">🚀 添加滑翔机</button>
+        <label>速度: <input type="range" id="speed-slider" min="1" max="120" value="120"> <span id="speed-value">120 FPS</span></label>
+    </div>
+    <canvas id="game-of-life-canvas"></canvas>
+    <div class="info">
+        <p>Click on cells to toggle them!</p>
+        <div class="stats">
+            <span id="fps-display">FPS: --</span>
+            <span id="alive-count">Alive: --</span>
+            <span id="generation-count">Gen: 0</span>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { Universe, Cell } from './pkg/wasm_project.js';
+
+        const CELL_SIZE = 8; // px
+        const GRID_COLOR = "#333333";
+        const DEAD_COLOR = "#000000";
+        const ALIVE_COLOR = "#FFFFFF";
+
+        let universe;
+        let width;
+        let height;
+        let canvas;
+        let ctx;
+        let animationId = null;
+
+        let wasm;
+
+        // FPS 计算和控制相关变量
+        let lastFrameTime = 0;
+        let frameCount = 0;
+        let fps = 0;
+        let fpsUpdateTime = 0;
+        let targetFPS = 120;  // 支持120fps高刷新率
+        let frameInterval = 1000 / targetFPS;
+        let generation = 0;  // 代数计数器
+
+        async function run() {
+            wasm = await init();
+            
+            universe = Universe.new();
+            width = universe.width();
+            height = universe.height();
+
+            canvas = document.getElementById("game-of-life-canvas");
+            canvas.height = (CELL_SIZE + 1) * height + 1;
+            canvas.width = (CELL_SIZE + 1) * width + 1;
+
+            ctx = canvas.getContext('2d');
+
+            // Add click event listener
+            canvas.addEventListener("click", event => {
+                const boundingRect = canvas.getBoundingClientRect();
+
+                const scaleX = canvas.width / boundingRect.width;
+                const scaleY = canvas.height / boundingRect.height;
+
+                const canvasLeft = (event.clientX - boundingRect.left) * scaleX;
+                const canvasTop = (event.clientY - boundingRect.top) * scaleY;
+
+                const row = Math.min(Math.floor(canvasTop / (CELL_SIZE + 1)), height - 1);
+                const col = Math.min(Math.floor(canvasLeft / (CELL_SIZE + 1)), width - 1);
+
+                universe.toggle_cell(row, col);
+
+                drawGrid();
+                drawCells();
+            });
+
+            // Control buttons
+            const playPauseButton = document.getElementById("pause-play");
+            const resetButton = document.getElementById("reset");
+
+            playPauseButton.addEventListener("click", event => {
+                if (isPaused()) {
+                    play();
+                } else {
+                    pause();
+                }
+            });
+
+            resetButton.addEventListener("click", event => {
+                universe = Universe.new();
+                generation = 0; // 重置代数计数器
+                drawGrid();
+                drawCells();
+            });
+
+            // 性能测试按钮
+            const perfTestButton = document.getElementById("perf-test");
+            perfTestButton.addEventListener("click", event => {
+                performanceTest();
+            });
+
+            // 清空按钮
+            const clearButton = document.getElementById("clear");
+            clearButton.addEventListener("click", event => {
+                universe.clear();
+                generation = 0; // 重置代数计数器
+                drawGrid();
+                drawCells();
+            });
+
+            // 随机按钮
+            const randomizeButton = document.getElementById("randomize");
+            randomizeButton.addEventListener("click", event => {
+                universe.randomize();
+                generation = 0; // 重置代数计数器
+                drawGrid();
+                drawCells();
+            });
+
+            // 调整大小按钮
+            const resizeButton = document.getElementById("resize");
+            const widthInput = document.getElementById("width-input");
+            const heightInput = document.getElementById("height-input");
+            
+            resizeButton.addEventListener("click", event => {
+                const newWidth = parseInt(widthInput.value);
+                const newHeight = parseInt(heightInput.value);
+                
+                if (newWidth > 0 && newHeight > 0) {
+                    universe.resize(newWidth, newHeight);
+                    width = newWidth;
+                    height = newHeight;
+                    generation = 0; // 重置代数计数器
+                    
+                    // 调整画布大小
+                    canvas.height = (CELL_SIZE + 1) * height + 1;
+                    canvas.width = (CELL_SIZE + 1) * width + 1;
+                    
+                    drawGrid();
+                    drawCells();
+                }
+            });
+
+            // 添加滑翔机按钮
+            const gliderButton = document.getElementById("glider");
+            gliderButton.addEventListener("click", event => {
+                // 在随机位置添加滑翔机
+                const startRow = Math.floor(Math.random() * (height - 5));
+                const startCol = Math.floor(Math.random() * (width - 5));
+                universe.set_glider(startRow, startCol);
+                drawGrid();
+                drawCells();
+            });
+
+            // 速度控制滑块 - 支持120fps高刷新率
+            const speedSlider = document.getElementById("speed-slider");
+            const speedValue = document.getElementById("speed-value");
+            
+            if (speedSlider && speedValue) {
+                speedSlider.addEventListener("input", event => {
+                    targetFPS = parseInt(event.target.value);
+                    frameInterval = 1000 / targetFPS;
+                    speedValue.textContent = `${targetFPS} FPS`;
+                });
+            }
+
+            drawGrid();
+            drawCells();
+            play();
+        }
+
+        const isPaused = () => {
+            return animationId === null;
+        };
+
+        const play = () => {
+            const playPauseButton = document.getElementById("pause-play");
+            playPauseButton.textContent = "⏸️ Pause";
+            renderLoop();
+        };
+
+        const pause = () => {
+            const playPauseButton = document.getElementById("pause-play");
+            playPauseButton.textContent = "▶️ Play";
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        };
+
+        const renderLoop = (currentTime) => {
+            // 帧率控制 - 支持120fps高刷新率
+            if (currentTime - lastFrameTime < frameInterval) {
+                animationId = requestAnimationFrame(renderLoop);
+                return;
+            }
+
+            // 计算实际FPS - 更频繁的更新以获得更实时的显示
+            frameCount++;
+            if (currentTime - fpsUpdateTime >= 250) { // 每250ms更新一次FPS，更实时
+                fps = Math.round((frameCount * 1000) / (currentTime - fpsUpdateTime));
+                frameCount = 0;
+                fpsUpdateTime = currentTime;
+            }
+
+            // 更新实时统计信息
+            const fpsDisplay = document.getElementById('fps-display');
+            const aliveCount = document.getElementById('alive-count');
+            const generationCount = document.getElementById('generation-count');
+            
+            if (fpsDisplay) fpsDisplay.textContent = `FPS: ${fps}`;
+            if (aliveCount) aliveCount.textContent = `Alive: ${universe.alive_count()}`;
+            if (generationCount) generationCount.textContent = `Gen: ${generation}`;
+
+            // 性能测试：测量Rust WASM的tick性能
+            const start = performance.now();
+            universe.tick();
+            generation++; // 增加代数计数
+            const end = performance.now();
+            
+            // 每100帧输出一次性能数据
+            if (Math.random() < 0.01) {
+                console.log(`Rust WASM tick: ${(end - start).toFixed(3)}ms`);
+            }
+
+            drawGrid();
+            drawCells();
+
+            lastFrameTime = currentTime;
+            animationId = requestAnimationFrame(renderLoop);
+        };
+
+        const drawGrid = () => {
+            ctx.beginPath();
+            ctx.strokeStyle = GRID_COLOR;
+
+            // Vertical lines.
+            for (let i = 0; i <= width; i++) {
+                ctx.moveTo(i * (CELL_SIZE + 1) + 1, 0);
+                ctx.lineTo(i * (CELL_SIZE + 1) + 1, (CELL_SIZE + 1) * height + 1);
+            }
+
+            // Horizontal lines.
+            for (let j = 0; j <= height; j++) {
+                ctx.moveTo(0,                           j * (CELL_SIZE + 1) + 1);
+                ctx.lineTo((CELL_SIZE + 1) * width + 1, j * (CELL_SIZE + 1) + 1);
+            }
+
+            ctx.stroke();
+        };
+
+        const getIndex = (row, column) => {
+            return row * width + column;
+        };
+
+        const drawCells = () => {
+            const cellsPtr = universe.cells();
+            const cells = new Uint8Array(wasm.memory.buffer, cellsPtr, width * height);
+
+            ctx.beginPath();
+
+            for (let row = 0; row < height; row++) {
+                for (let col = 0; col < width; col++) {
+                    const idx = getIndex(row, col);
+
+                    ctx.fillStyle = cells[idx] === Cell.Dead
+                        ? DEAD_COLOR
+                        : ALIVE_COLOR;
+
+                    ctx.fillRect(
+                        col * (CELL_SIZE + 1) + 1,
+                        row * (CELL_SIZE + 1) + 1,
+                        CELL_SIZE,
+                        CELL_SIZE
+                    );
+                }
+            }
+
+            ctx.stroke();
+        };
+
+        // JavaScript版本的生命游戏实现（用于性能对比）
+        class JSUniverse {
+            constructor(width, height) {
+                this.width = width;
+                this.height = height;
+                this.cells = new Array(width * height);
+                
+                // 使用相同的初始化逻辑
+                for (let i = 0; i < width * height; i++) {
+                    this.cells[i] = (i % 2 === 0 || i % 7 === 0) ? 1 : 0;
+                }
+            }
+
+            getIndex(row, col) {
+                return row * this.width + col;
+            }
+
+            liveNeighborCount(row, col) {
+                let count = 0;
+                for (let deltaRow of [this.height - 1, 0, 1]) {
+                    for (let deltaCol of [this.width - 1, 0, 1]) {
+                        if (deltaRow === 0 && deltaCol === 0) continue;
+                        
+                        const neighborRow = (row + deltaRow) % this.height;
+                        const neighborCol = (col + deltaCol) % this.width;
+                        const idx = this.getIndex(neighborRow, neighborCol);
+                        count += this.cells[idx];
+                    }
+                }
+                return count;
+            }
+
+            tick() {
+                const next = new Array(this.width * this.height);
+                
+                for (let row = 0; row < this.height; row++) {
+                    for (let col = 0; col < this.width; col++) {
+                        const idx = this.getIndex(row, col);
+                        const cell = this.cells[idx];
+                        const liveNeighbors = this.liveNeighborCount(row, col);
+
+                        let nextCell;
+                        if (cell === 1 && liveNeighbors < 2) {
+                            nextCell = 0; // 死亡
+                        } else if (cell === 1 && (liveNeighbors === 2 || liveNeighbors === 3)) {
+                            nextCell = 1; // 存活
+                        } else if (cell === 1 && liveNeighbors > 3) {
+                            nextCell = 0; // 死亡
+                        } else if (cell === 0 && liveNeighbors === 3) {
+                            nextCell = 1; // 复活
+                        } else {
+                            nextCell = cell; // 保持不变
+                        }
+
+                        next[idx] = nextCell;
+                    }
+                }
+                
+                this.cells = next;
+            }
+        }
+
+        function performanceTest() {
+            console.log("🚀 开始性能测试...");
+            
+            const testIterations = 1000;
+            const testWidth = width;  // 使用当前宇宙大小
+            const testHeight = height;
+
+            console.log(`测试规格: ${testWidth}x${testHeight}, ${testIterations} 次迭代`);
+
+            // 测试Rust WASM版本
+            console.time("Rust WASM");
+            const rustUniverse = Universe.new_with_size(testWidth, testHeight);
+            for (let i = 0; i < testIterations; i++) {
+                rustUniverse.tick();
+            }
+            console.timeEnd("Rust WASM");
+
+            // 测试JavaScript版本
+            console.time("JavaScript");
+            const jsUniverse = new JSUniverse(testWidth, testHeight);
+            for (let i = 0; i < testIterations; i++) {
+                jsUniverse.tick();
+            }
+            console.timeEnd("JavaScript");
+
+            console.log("📊 测试完成！请查看上方的时间对比");
+            console.log(`当前活细胞数量: ${universe.alive_count()}`);
+        }
+
+        run();
+    </script>
+</body>
+</html>
